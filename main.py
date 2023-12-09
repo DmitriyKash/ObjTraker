@@ -1,88 +1,120 @@
 import cv2
+import numpy as np
 
-# Инициализация переменных
+# Шляхи до файлів моделі YOLO
+modelConfiguration = "yolov3-spp.cfg"
+modelWeights = "yolov3-spp.weights"
+classesFile = "coco.names"
+
+# Завантаження назв класів
+classes = None
+with open(classesFile, 'rt') as f:
+    classes = f.read().rstrip('\n').split('\n')
+
+# Налаштування мережі YOLO
+net = cv2.dnn.readNetFromDarknet(modelConfiguration, modelWeights)
+net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+
+# Функція для отримання висновків від моделі YOLO
+def get_outputs(image):
+    blob = cv2.dnn.blobFromImage(image, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+    net.setInput(blob)
+    layer_names = net.getLayerNames()
+    output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+    outputs = net.forward(output_layers)
+    return outputs
+
+
+# Ініціалізація змінних
 ix, iy, w, h = -1, -1, -1, -1
 drawing = False
 tracker = None
+selected_region = None
+tracking = False
 
 
-# Callback-функция для обработки нажатий кнопок мыши
+# Callback-функція для обробки нажатий кнопок мыши
 def mouse_callback(event, x, y, flags, param):
-    """
-        Callback-функция для обработки нажатий кнопок мыши.
-
-        При нажатии левой кнопки мыши инициализирует начальные координаты прямоугольника.
-        При движении мыши с зажатой левой кнопкой обновляет размеры прямоугольника.
-        При отпускании кнопки завершает рисование прямоугольника и инициализирует трекер.
-
-        Аргументы:
-        event: Тип события мыши.
-        x, y: Координаты курсора мыши.
-        flags: Дополнительные флаги, передаваемые OpenCV.
-        param: Дополнительные параметры (не используются).
-        """
-    global ix, iy, w, h, drawing, tracker, selected_region
+    global ix, iy, w, h, drawing, tracker, selected_region, tracking
 
     if event == cv2.EVENT_LBUTTONDOWN:
         ix, iy = x, y
         w, h = 0, 0
         drawing = True
+        tracking = False
         tracker = None
-
-    elif event == cv2.EVENT_LBUTTONUP:
-        drawing = False
-        if w > 0 and h > 0:
-
-            tracker = cv2.TrackerMIL_create()
-            bbox = (ix, iy, w, h)
-            ok = tracker.init(frame, bbox)
-            selected_region = frame[iy:iy + h, ix:ix + w].copy()
 
     elif event == cv2.EVENT_MOUSEMOVE:
         if drawing:
             w, h = x - ix, y - iy
 
+    elif event == cv2.EVENT_LBUTTONUP:
+        drawing = False
+        if w > 0 and h > 0:
+            tracker = cv2.TrackerMIL_create()
+            bbox = (ix, iy, w, h)
+            ok = tracker.init(frame, bbox)
+            selected_region = frame[iy:iy + h, ix:ix + w].copy()
+            tracking = True
+            process_selected_region(selected_region)
 
-# Включение видеозахвата
+
+def process_selected_region(region):
+    class_label, confidence = "", 0.0
+    if region is not None and region.shape[0] > 0 and region.shape[1] > 0:
+        outputs = get_outputs(region)
+
+        # Перебір кожного виявлення
+        for out in outputs:
+            for detection in out:
+                scores = detection[5:]
+                class_id = np.argmax(scores)
+                confidence = scores[class_id]
+                if confidence > 0.5:
+                    class_label = classes[class_id]
+                    break  # припиняємо цикл після першого виявлення
+
+    return class_label, confidence
+
+
+# Включення відеозахвату
 cap = cv2.VideoCapture(0)
 
-# Установка callback-функции
+# Налаштування callback-функції
 cv2.namedWindow("Frame")
 cv2.setMouseCallback("Frame", mouse_callback)
 
 while True:
-    """
-        Основной цикл захвата видео.
-
-        В этом цикле происходит чтение кадров с камеры и обработка событий мыши.
-        В случае активации трекера, он обновляет положение прямоугольника.
-        При нажатии клавиши 'q' цикл завершается и закрываются все окна.
-        """
-    # Захват кадра с видеопотока
+    # Захват кадру з відеопотоку
     ret, frame = cap.read()
+    if not ret:
+        break
 
-    if tracker:
+    # Відстеження об'єкта
+    if tracking:
         ok, bbox = tracker.update(frame)
         if ok:
             (x, y, w, h) = [int(v) for v in bbox]
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-    # Рисование квадрата на кадре
-    if drawing and w > 0 and h > 0:
+            # Отримання інформації про об'єкт та її відображення
+            class_label, confidence = process_selected_region(frame[y:y + h, x:x + w])
+            if class_label:
+                label = '%s: %.2f' % (class_label, confidence)
+                cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
+    # Рисування квадрату на кадрі
+    if drawing and w > 0 and h > 0:
         cv2.rectangle(frame, (ix, iy), (ix + w, iy + h), (0, 255, 0), 2)
 
-    # Отображение кадра с выделенной областью
+    # Відображення кадру з виділеною областю
     cv2.imshow("Frame", frame)
 
-    # Выход из цикла при нажатии клавиши 'q'
+    # Вихід з циклу при натисканні клавіші 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
-
-# Сохранение выбранной области в файл
-
-# if selected_region is not None:
-#     cv2.imwrite('selected_region.png', selected_region)
 
 cap.release()
 cv2.destroyAllWindows()
